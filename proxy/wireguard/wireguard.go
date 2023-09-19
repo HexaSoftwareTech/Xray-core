@@ -75,6 +75,16 @@ func New(ctx context.Context, conf *DeviceConfig) (*Handler, error) {
 
 // Process implements OutboundHandler.Dispatch().
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+	outbound := session.OutboundFromContext(ctx)
+	if outbound == nil || !outbound.Target.IsValid() {
+		return newError("target not specified")
+	}
+	outbound.Name = "wireguard"
+	inbound := session.InboundFromContext(ctx)
+	if inbound != nil {
+		inbound.SetCanSpliceCopy(3)
+	}
+
 	if h.bind == nil || h.bind.dialer != dialer || h.net == nil {
 		log.Record(&log.GeneralMessage{
 			Severity: log.Severity_Info,
@@ -82,9 +92,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		})
 		// bind := conn.NewStdNetBind() // TODO: conn.Bind wrapper for dialer
 		bind := &netBindClient{
-			dialer:  dialer,
-			workers: int(h.conf.NumWorkers),
-			dns:     h.dns,
+			dialer:   dialer,
+			workers:  int(h.conf.NumWorkers),
+			dns:      h.dns,
+			reserved: h.conf.Reserved,
 		}
 
 		net, err := h.makeVirtualTun(bind)
@@ -100,10 +111,6 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		h.bind = bind
 	}
 
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
-		return newError("target not specified")
-	}
 	// Destination of the inner request.
 	destination := outbound.Target
 	command := protocol.RequestCommandTCP
@@ -126,10 +133,21 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		addr = net.IPAddress(ips[0])
 	}
 
+	var newCtx context.Context
+	var newCancel context.CancelFunc
+	if session.TimeoutOnlyFromContext(ctx) {
+		newCtx, newCancel = context.WithCancel(context.Background())
+	}
+
 	p := h.policyManager.ForLevel(0)
 
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, func() {
+		cancel()
+		if newCancel != nil {
+			newCancel()
+		}
+	}, p.Timeouts.ConnectionIdle)
 	addrPort := netip.AddrPortFrom(toNetIpAddr(addr), destination.Port.Value())
 
 	var requestFunc func() error
@@ -140,6 +158,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if err != nil {
 			return newError("failed to create TCP connection").Base(err)
 		}
+		defer conn.Close()
 
 		requestFunc = func() error {
 			defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
@@ -154,6 +173,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if err != nil {
 			return newError("failed to create UDP connection").Base(err)
 		}
+		defer conn.Close()
 
 		requestFunc = func() error {
 			defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
@@ -165,8 +185,14 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 	}
 
+	if newCtx != nil {
+		ctx = newCtx
+	}
+
 	responseDonePost := task.OnSuccess(responseFunc, task.Close(link.Writer))
 	if err := task.Run(ctx, requestFunc, responseDonePost); err != nil {
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		return newError("connection ends").Base(err)
 	}
 

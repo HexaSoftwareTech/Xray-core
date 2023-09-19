@@ -1,22 +1,20 @@
 package quic
 
-import (
-	"fmt"
-
-	"github.com/xtls/xray-core/common/log"
-)
+import "github.com/quic-go/quic-go"
 
 type QlogWriter struct {
-	connID []byte
+	connID quic.ConnectionID
 }
 
 func (w *QlogWriter) Write(b []byte) (int, error) {
-	if len(b) > 1 { // skip line separator "0a" in qlog
-		log.Record(&log.GeneralMessage{
-			Severity: log.Severity_Debug,
-			Content:  fmt.Sprintf("[%x] %s", w.connID, b),
-		})
-	}
+	// to much log, only turn on when debug Quic
+
+	// if len(b) > 1 { // skip line separator "0a" in qlog
+	// 	log.Record(&log.GeneralMessage{
+	// 		Severity: log.Severity_Debug,
+	// 		Content:  fmt.Sprintf("[%x] %s", w.connID, b),
+	// 	})
+	// }
 	return len(b), nil
 }
 

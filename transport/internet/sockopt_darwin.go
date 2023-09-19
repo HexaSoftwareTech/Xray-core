@@ -1,11 +1,12 @@
 package internet
 
 import (
-	"github.com/xtls/xray-core/common/net"
-	"golang.org/x/sys/unix"
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/xtls/xray-core/common/net"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -123,6 +124,12 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		} else if config.TcpKeepAliveInterval < 0 || config.TcpKeepAliveIdle < 0 {
 			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_KEEPALIVE, 0); err != nil {
 				return newError("failed to unset SO_KEEPALIVE", err)
+			}
+		}
+
+		if config.TcpNoDelay {
+			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NODELAY, 1); err != nil {
+				return newError("failed to set TCP_NODELAY", err)
 			}
 		}
 	}

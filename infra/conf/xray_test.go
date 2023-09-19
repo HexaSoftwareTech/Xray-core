@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/google/go-cmp/cmp"
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/log"
@@ -27,6 +26,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/http"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"github.com/xtls/xray-core/transport/internet/websocket"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestXrayConfig(t *testing.T) {
@@ -221,7 +221,8 @@ func TestXrayConfig(t *testing.T) {
 							},
 						}),
 						ProxySettings: serial.ToTypedMessage(&dns_proxy.Config{
-							Server: &net.Endpoint{},
+							Server:      &net.Endpoint{},
+							Non_IPQuery: "drop",
 						}),
 					},
 				},
@@ -340,24 +341,35 @@ func TestMuxConfig_Build(t *testing.T) {
 		want   *proxyman.MultiplexingConfig
 	}{
 		{"default", `{"enabled": true, "concurrency": 16}`, &proxyman.MultiplexingConfig{
-			Enabled:     true,
-			Concurrency: 16,
+			Enabled:         true,
+			Concurrency:     16,
+			XudpConcurrency: 0,
+			XudpProxyUDP443: "reject",
 		}},
 		{"empty def", `{}`, &proxyman.MultiplexingConfig{
-			Enabled:     false,
-			Concurrency: 8,
+			Enabled:         false,
+			Concurrency:     0,
+			XudpConcurrency: 0,
+			XudpProxyUDP443: "reject",
 		}},
 		{"not enable", `{"enabled": false, "concurrency": 4}`, &proxyman.MultiplexingConfig{
-			Enabled:     false,
-			Concurrency: 4,
+			Enabled:         false,
+			Concurrency:     4,
+			XudpConcurrency: 0,
+			XudpProxyUDP443: "reject",
 		}},
-		{"forbidden", `{"enabled": false, "concurrency": -1}`, nil},
+		{"forbidden", `{"enabled": false, "concurrency": -1}`, &proxyman.MultiplexingConfig{
+			Enabled:         false,
+			Concurrency:     -1,
+			XudpConcurrency: 0,
+			XudpProxyUDP443: "reject",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := &MuxConfig{}
 			common.Must(json.Unmarshal([]byte(tt.fields), m))
-			if got := m.Build(); !reflect.DeepEqual(got, tt.want) {
+			if got, _ := m.Build(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("MuxConfig.Build() = %v, want %v", got, tt.want)
 			}
 		})

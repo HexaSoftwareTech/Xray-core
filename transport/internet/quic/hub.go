@@ -2,12 +2,11 @@ package quic
 
 import (
 	"context"
-	"io"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/logging"
-	"github.com/lucas-clemente/quic-go/qlog"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/logging"
+	"github.com/quic-go/quic-go/qlog"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol/tls/cert"
@@ -19,7 +18,7 @@ import (
 // Listener is an internet.Listener that listens for TCP connections.
 type Listener struct {
 	rawConn  *sysConn
-	listener quic.Listener
+	listener *quic.Listener
 	done     *done.Instance
 	addConn  internet.ConnHandler
 }
@@ -104,15 +103,14 @@ func Listen(ctx context.Context, address net.Address, port net.Port, streamSetti
 	}
 
 	quicConfig := &quic.Config{
-		ConnectionIDLength:    12,
 		KeepAlivePeriod:       0,
-		HandshakeIdleTimeout: time.Second * 8,
-		MaxIdleTimeout:       time.Second * 300,
+		HandshakeIdleTimeout:  time.Second * 8,
+		MaxIdleTimeout:        time.Second * 300,
 		MaxIncomingStreams:    32,
 		MaxIncomingUniStreams: -1,
-		Tracer: qlog.NewTracer(func(_ logging.Perspective, connID []byte) io.WriteCloser {
-			return &QlogWriter{connID: connID}
-		}),
+		Tracer: func(ctx context.Context, p logging.Perspective, ci quic.ConnectionID) logging.ConnectionTracer {
+			return qlog.NewConnectionTracer(&QlogWriter{connID: ci}, p, ci)
+		},
 	}
 
 	conn, err := wrapSysConn(rawConn.(*net.UDPConn), config)
@@ -120,8 +118,11 @@ func Listen(ctx context.Context, address net.Address, port net.Port, streamSetti
 		conn.Close()
 		return nil, err
 	}
-
-	qListener, err := quic.Listen(conn, tlsConfig.GetTLSConfig(), quicConfig)
+	tr := quic.Transport{
+		ConnectionIDLength: 12,
+		Conn:               conn,
+	}
+	qListener, err := tr.Listen(tlsConfig.GetTLSConfig(), quicConfig)
 	if err != nil {
 		conn.Close()
 		return nil, err

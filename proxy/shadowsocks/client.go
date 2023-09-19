@@ -53,6 +53,11 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	if outbound == nil || !outbound.Target.IsValid() {
 		return newError("target not specified")
 	}
+	outbound.Name = "shadowsocks"
+	inbound := session.InboundFromContext(ctx)
+	if inbound != nil {
+		inbound.SetCanSpliceCopy(3)
+	}
 	destination := outbound.Target
 	network := destination.Network
 
@@ -96,9 +101,24 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	}
 	request.User = user
 
+	var newCtx context.Context
+	var newCancel context.CancelFunc
+	if session.TimeoutOnlyFromContext(ctx) {
+		newCtx, newCancel = context.WithCancel(context.Background())
+	}
+
 	sessionPolicy := c.policyManager.ForLevel(user.Level)
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, func() {
+		cancel()
+		if newCancel != nil {
+			newCancel()
+		}
+	}, sessionPolicy.Timeouts.ConnectionIdle)
+
+	if newCtx != nil {
+		ctx = newCtx
+	}
 
 	if request.Command == protocol.RequestCommandTCP {
 		requestDone := func() error {
