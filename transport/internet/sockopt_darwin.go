@@ -111,15 +111,17 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 
 		if config.Interface != "" {
 			InterfaceIndex := getInterfaceIndexByName(config.Interface)
-			newError("interfaceIndex ", InterfaceIndex).AtDebug().WriteToLog()
+			newError("interfaceIndex ", InterfaceIndex).AtInfo().WriteToLog()
 
 			if InterfaceIndex != 0 {
 				if err := unix.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, InterfaceIndex); err != nil {
 					return newError("failed to set Interface").Base(err)
 				}
-				newError("set Interface", config.Interface).AtDebug().WriteToLog()
+				newError("set Interface", config.Interface).AtInfo().WriteToLog()
 
 			}
+			newError("interfaceIndex2 ", InterfaceIndex).AtInfo().WriteToLog()
+
 		}
 		if config.TcpKeepAliveIdle > 0 || config.TcpKeepAliveInterval > 0 {
 			if config.TcpKeepAliveIdle > 0 {
@@ -242,9 +244,9 @@ func getInterfaceIndexByName(name string) int {
 			if (iface.Flags&network.FlagUp == network.FlagUp) && (iface.Flags&network.FlagLoopback != network.FlagLoopback) {
 				addrs, _ := iface.Addrs()
 				for _, addr := range addrs {
-					if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+					if ipnet, ok := addr.(*network.IPNet); ok && !ipnet.IP.IsLoopback() {
 						if ipnet.IP.To4() != nil {
-							if iface.Name+"\x00" == name {
+							if iface.Name == name {
 								return iface.Index
 							}
 						}
