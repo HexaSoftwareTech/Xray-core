@@ -98,6 +98,8 @@ func OriginalDst(la, ra net.Addr) (net.IP, int, error) {
 }
 
 func applyOutboundSocketOptions(network string, address string, fd uintptr, config *SocketConfig) error {
+	newError("isTCPSocket", network).AtDebug().WriteToLog()
+
 	if isTCPSocket(network) {
 		tfo := config.ParseTFOValue()
 		if tfo > 0 {
@@ -108,12 +110,16 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 				return err
 			}
 		}
+		newError("config.Interface", config.Interface).AtDebug().WriteToLog()
+
 		if config.Interface != "" {
 			InterfaceIndex := getInterfaceIndexByName(config.Interface)
 			if InterfaceIndex != 0 {
 				if err := unix.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, InterfaceIndex); err != nil {
 					return newError("failed to set Interface").Base(err)
 				}
+				newError("set Interface", config.Interface).AtDebug().WriteToLog()
+
 			}
 		}
 		if config.TcpKeepAliveIdle > 0 || config.TcpKeepAliveInterval > 0 {
