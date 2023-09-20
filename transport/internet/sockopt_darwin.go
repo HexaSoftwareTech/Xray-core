@@ -30,6 +30,7 @@ const (
 	// #define	_IOWR(g,n,t)	_IOC(IOCInOut,	(g), (n), sizeof(t))
 	// #define DIOCNATLOOK		_IOWR('D', 23, struct pfioc_natlook)
 	DIOCNATLOOK = IOCInOut | ((LEN & IOCPARMMask) << 16) | ('D' << 8) | 23
+	soReUsePort = 0x0200
 )
 
 // OriginalDst uses ioctl to read original destination from /dev/pf
@@ -190,16 +191,45 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 }
 
 func bindAddr(fd uintptr, address []byte, port uint32) error {
-	return nil
+	setReuseAddr(fd)
+	setReusePort(fd)
+
+	var sockaddr unix.Sockaddr
+
+	switch len(address) {
+	case net.IPv4len:
+		a4 := &unix.SockaddrInet4{
+			Port: int(port),
+		}
+		copy(a4.Addr[:], address)
+		sockaddr = a4
+	case net.IPv6len:
+		a6 := &unix.SockaddrInet6{
+			Port: int(port),
+		}
+		copy(a6.Addr[:], address)
+		sockaddr = a6
+	default:
+		return newError("unexpected length of ip")
+	}
+
+	return unix.Bind(int(fd), sockaddr)
 }
 
 func setReuseAddr(fd uintptr) error {
+	if err := unix.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		return newError("failed to set SO_REUSEADDR").Base(err).AtWarning()
+	}
 	return nil
 }
 
 func setReusePort(fd uintptr) error {
+	if err := unix.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soReUsePort, 1); err != nil {
+		return newError("failed to set SO_REUSEPORT").Base(err).AtWarning()
+	}
 	return nil
 }
+
 func getInterfaceIndexByName(name string) int {
 	ifaces, err := network.Interfaces()
 	if err == nil {
