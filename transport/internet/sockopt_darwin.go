@@ -1,6 +1,7 @@
 package internet
 
 import (
+	network "net"
 	"os"
 	"syscall"
 	"unsafe"
@@ -148,6 +149,15 @@ func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig)
 				return err
 			}
 		}
+		if config.Interface != "" {
+			InterfaceIndex := getInterfaceIndexByName(config.Interface)
+			if InterfaceIndex != 0 {
+				if err := unix.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, InterfaceIndex); err != nil {
+					return newError("failed to set Interface").Base(err)
+				}
+			}
+		}
+
 		if config.TcpKeepAliveIdle > 0 || config.TcpKeepAliveInterval > 0 {
 			if config.TcpKeepAliveIdle > 0 {
 				if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPALIVE, int(config.TcpKeepAliveInterval)); err != nil {
@@ -182,4 +192,16 @@ func setReuseAddr(fd uintptr) error {
 
 func setReusePort(fd uintptr) error {
 	return nil
+}
+func getInterfaceIndexByName(name string) int {
+	ifaces, err := network.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Name+"\x00" == name {
+				return iface.Index
+			}
+
+		}
+	}
+	return 0
 }
