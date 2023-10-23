@@ -3,7 +3,7 @@ package conf
 import (
 	"sort"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/xtls/xray-core/transport/internet/headers/dns"
 	"github.com/xtls/xray-core/transport/internet/headers/http"
 	"github.com/xtls/xray-core/transport/internet/headers/noop"
 	"github.com/xtls/xray-core/transport/internet/headers/srtp"
@@ -11,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/headers/utp"
 	"github.com/xtls/xray-core/transport/internet/headers/wechat"
 	"github.com/xtls/xray-core/transport/internet/headers/wireguard"
+	"google.golang.org/protobuf/proto"
 )
 
 type NoOpAuthenticator struct{}
@@ -47,6 +48,19 @@ type WireguardAuthenticator struct{}
 
 func (WireguardAuthenticator) Build() (proto.Message, error) {
 	return new(wireguard.WireguardConfig), nil
+}
+
+type DNSAuthenticator struct {
+	Domain string `json:"domain"`
+}
+
+func (v *DNSAuthenticator) Build() (proto.Message, error) {
+	config := new(dns.Config)
+	config.Domain = "www.baidu.com"
+	if len(v.Domain) > 0 {
+		config.Domain = v.Domain
+	}
+	return config, nil
 }
 
 type DTLSAuthenticator struct{}

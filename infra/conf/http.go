@@ -3,10 +3,10 @@ package conf
 import (
 	"encoding/json"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/proxy/http"
+	"google.golang.org/protobuf/proto"
 )
 
 type HTTPAccount struct {
@@ -53,6 +53,7 @@ type HTTPRemoteConfig struct {
 
 type HTTPClientConfig struct {
 	Servers []*HTTPRemoteConfig `json:"servers"`
+	Headers map[string]string   `json:"headers"`
 }
 
 func (v *HTTPClientConfig) Build() (proto.Message, error) {
@@ -76,6 +77,13 @@ func (v *HTTPClientConfig) Build() (proto.Message, error) {
 			server.User = append(server.User, user)
 		}
 		config.Server[idx] = server
+	}
+	config.Header = make([]*http.Header, 0, 32)
+	for key, value := range v.Headers {
+		config.Header = append(config.Header, &http.Header{
+			Key:   key,
+			Value: value,
+		})
 	}
 	return config, nil
 }

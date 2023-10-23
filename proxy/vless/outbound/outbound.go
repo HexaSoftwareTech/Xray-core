@@ -3,44 +3,39 @@ package outbound
 //go:generate go run github.com/xtls/xray-core/common/errors/errorgen
 
 import (
+	"bytes"
 	"context"
-	"syscall"
+	gotls "crypto/tls"
+	"reflect"
+	"time"
+	"unsafe"
 
+	utls "github.com/refraction-networking/utls"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/retry"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/common/xudp"
-	core "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
-	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/vless"
 	"github.com/xtls/xray-core/proxy/vless/encoding"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
-	"github.com/xtls/xray-core/transport/internet/xtls"
 )
-
-var xtls_show = false
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		return New(ctx, config.(*Config))
 	}))
-
-	const defaultFlagValue = "NOT_DEFINED_AT_ALL"
-
-	xtlsShow := platform.NewEnvFlag("xray.vless.xtls.show").GetValue(func() string { return defaultFlagValue })
-	if xtlsShow == "true" {
-		xtls_show = true
-	}
 }
 
 // Handler is an outbound connection handler for VLess protocol.
@@ -75,9 +70,15 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 
 // Process implements proxy.Outbound.Process().
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+	outbound := session.OutboundFromContext(ctx)
+	if outbound == nil || !outbound.Target.IsValid() {
+		return newError("target not specified").AtError()
+	}
+	outbound.Name = "vless"
+	inbound := session.InboundFromContext(ctx)
+
 	var rec *protocol.ServerSpec
 	var conn stat.Connection
-
 	if err := retry.ExponentialBackoff(5, 200).On(func() error {
 		rec = h.serverPicker.PickServer()
 		var err error
@@ -92,16 +93,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	defer conn.Close()
 
 	iConn := conn
-	statConn, ok := iConn.(*stat.CounterConnection)
-	if ok {
+	if statConn, ok := iConn.(*stat.CounterConnection); ok {
 		iConn = statConn.Connection
 	}
-
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
-		return newError("target not specified").AtError()
-	}
-
 	target := outbound.Target
 	newError("tunneling request to ", target, " via ", rec.Destination().NetAddr()).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
@@ -127,74 +121,70 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		Flow: account.Flow,
 	}
 
-	var netConn net.Conn
-	var rawConn syscall.RawConn
+	var input *bytes.Reader
+	var rawInput *bytes.Buffer
 	allowUDP443 := false
 	switch requestAddons.Flow {
-	case vless.XRO + "-udp443", vless.XRD + "-udp443", vless.XRS + "-udp443", vless.XRV + "-udp443":
+	case vless.XRV + "-udp443":
 		allowUDP443 = true
 		requestAddons.Flow = requestAddons.Flow[:16]
 		fallthrough
-	case vless.XRO, vless.XRD, vless.XRS, vless.XRV:
+	case vless.XRV:
+		if inbound != nil {
+			inbound.SetCanSpliceCopy(2)
+		}
 		switch request.Command {
-		case protocol.RequestCommandMux:
-			return newError(requestAddons.Flow + " doesn't support Mux").AtWarning()
 		case protocol.RequestCommandUDP:
 			if !allowUDP443 && request.Port == 443 {
-				return newError(requestAddons.Flow + " stopped UDP/443").AtInfo()
+				return newError("XTLS rejected UDP/443 traffic").AtInfo()
 			}
 			requestAddons.Flow = ""
+		case protocol.RequestCommandMux:
+			fallthrough // let server break Mux connections that contain TCP requests
 		case protocol.RequestCommandTCP:
-			if requestAddons.Flow == vless.XRV {
-				if tlsConn, ok := iConn.(*tls.Conn); ok {
-					netConn = tlsConn.NetConn()
-					if sc, ok :=  netConn.(syscall.Conn); ok {
-						rawConn, _ = sc.SyscallConn()
-					}
-				} else if utlsConn, ok := iConn.(*tls.UConn); ok {
-					netConn = utlsConn.Conn.NetConn()
-					if sc, ok := netConn.(syscall.Conn); ok {
-						rawConn, _ = sc.SyscallConn()
-					}
-				} else if _, ok := iConn.(*xtls.Conn); ok {
-					return newError(`failed to use ` + requestAddons.Flow + `, vision "security" must be "tls"`).AtWarning()
-				} else {
-					return newError("XTLS only supports TCP, mKCP and DomainSocket for now.").AtWarning()
-				}
-			} else if xtlsConn, ok := iConn.(*xtls.Conn); ok {
-				xtlsConn.RPRX = true
-				xtlsConn.SHOW = xtls_show
-				xtlsConn.MARK = "XTLS"
-				if requestAddons.Flow == vless.XRS {
-					requestAddons.Flow = vless.XRD
-				}
-				if requestAddons.Flow == vless.XRD {
-					xtlsConn.DirectMode = true
-					if sc, ok := xtlsConn.NetConn().(syscall.Conn); ok {
-						rawConn, _ = sc.SyscallConn()
-					}
-				}
+			var t reflect.Type
+			var p uintptr
+			if tlsConn, ok := iConn.(*tls.Conn); ok {
+				t = reflect.TypeOf(tlsConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(tlsConn.Conn))
+			} else if utlsConn, ok := iConn.(*tls.UConn); ok {
+				t = reflect.TypeOf(utlsConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(utlsConn.Conn))
+			} else if realityConn, ok := iConn.(*reality.UConn); ok {
+				t = reflect.TypeOf(realityConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(realityConn.Conn))
 			} else {
-				return newError(`failed to use ` + requestAddons.Flow + `, maybe "security" is not "xtls"`).AtWarning()
+				return newError("XTLS only supports TLS and REALITY directly for now.").AtWarning()
 			}
+			i, _ := t.FieldByName("input")
+			r, _ := t.FieldByName("rawInput")
+			input = (*bytes.Reader)(unsafe.Pointer(p + i.Offset))
+			rawInput = (*bytes.Buffer)(unsafe.Pointer(p + r.Offset))
 		}
 	default:
-		if _, ok := iConn.(*xtls.Conn); ok {
-			panic(`To avoid misunderstanding, you must fill in VLESS "flow" when using XTLS.`)
+		if inbound != nil {
+			inbound.SetCanSpliceCopy(3)
 		}
+	}
+
+	var newCtx context.Context
+	var newCancel context.CancelFunc
+	if session.TimeoutOnlyFromContext(ctx) {
+		newCtx, newCancel = context.WithCancel(context.Background())
 	}
 
 	sessionPolicy := h.policyManager.ForLevel(request.User.Level)
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, func() {
+		cancel()
+		if newCancel != nil {
+			newCancel()
+		}
+	}, sessionPolicy.Timeouts.ConnectionIdle)
 
 	clientReader := link.Reader // .(*pipe.Reader)
 	clientWriter := link.Writer // .(*pipe.Writer)
-	isTLS13 := false
-	isTLS12 := false
-	isTLS := false
-	numberOfPacketToFilter := 8
-
+	trafficState := proxy.NewTrafficState(account.ID.Bytes())
 	if request.Command == protocol.RequestCommandUDP && h.cone && request.Port != 53 && request.Port != 443 {
 		request.Command = protocol.RequestCommandMux
 		request.Address = net.DomainAddress("v1.mux.cool")
@@ -210,25 +200,28 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 
 		// default: serverWriter := bufferWriter
-		serverWriter := encoding.EncodeBodyAddons(bufferWriter, request, requestAddons)
+		serverWriter := encoding.EncodeBodyAddons(bufferWriter, request, requestAddons, trafficState, ctx)
 		if request.Command == protocol.RequestCommandMux && request.Port == 666 {
-			serverWriter = xudp.NewPacketWriter(serverWriter, target)
+			serverWriter = xudp.NewPacketWriter(serverWriter, target, xudp.GetGlobalID(ctx))
 		}
-		userUUID := account.ID.Bytes()
-		multiBuffer, err1 := clientReader.ReadMultiBuffer()
-		if err1 != nil {
-			return err1 // ...
-		}
-		if requestAddons.Flow == vless.XRV {
-			encoding.XtlsFilterTls13(multiBuffer, &numberOfPacketToFilter, &isTLS13, &isTLS12, &isTLS, ctx)
-			if isTLS {
-				for i, b := range multiBuffer {
-					multiBuffer[i] = encoding.XtlsPadding(b, 0x00, &userUUID, ctx)
+		timeoutReader, ok := clientReader.(buf.TimeoutReader)
+		if ok {
+			multiBuffer, err1 := timeoutReader.ReadMultiBufferTimeout(time.Millisecond * 500)
+			if err1 == nil {
+				if err := serverWriter.WriteMultiBuffer(multiBuffer); err != nil {
+					return err // ...
+				}
+			} else if err1 != buf.ErrReadTimeout {
+				return err1
+			} else if requestAddons.Flow == vless.XRV {
+				mb := make(buf.MultiBuffer, 1)
+				newError("Insert padding with empty content to camouflage VLESS header ", mb.Len()).WriteToLog(session.ExportIDToError(ctx))
+				if err := serverWriter.WriteMultiBuffer(mb); err != nil {
+					return err // ...
 				}
 			}
-		}
-		if err := serverWriter.WriteMultiBuffer(multiBuffer); err != nil {
-			return err // ...
+		} else {
+			newError("Reader is not timeout reader, will send out vless header separately from first payload").AtDebug().WriteToLog(session.ExportIDToError(ctx))
 		}
 		// Flush; bufferWriter.WriteMultiBufer now is bufferWriter.writer.WriteMultiBuffer
 		if err := bufferWriter.SetBuffered(false); err != nil {
@@ -236,12 +229,18 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 
 		var err error
-		if rawConn != nil && requestAddons.Flow == vless.XRV {
-			var counter stats.Counter
-			if statConn != nil {
-				counter = statConn.WriteCounter
+		if requestAddons.Flow == vless.XRV {
+			if tlsConn, ok := iConn.(*tls.Conn); ok {
+				if tlsConn.ConnectionState().Version != gotls.VersionTLS13 {
+					return newError(`failed to use `+requestAddons.Flow+`, found outer tls version `, tlsConn.ConnectionState().Version).AtWarning()
+				}
+			} else if utlsConn, ok := iConn.(*tls.UConn); ok {
+				if utlsConn.ConnectionState().Version != utls.VersionTLS13 {
+					return newError(`failed to use `+requestAddons.Flow+`, found outer tls version `, utlsConn.ConnectionState().Version).AtWarning()
+				}
 			}
-			err = encoding.XtlsWrite(clientReader, serverWriter, timer, netConn, counter, ctx, &userUUID, &numberOfPacketToFilter, &isTLS13, &isTLS12, &isTLS)
+			ctx1 := session.ContextWithOutbound(ctx, nil) // TODO enable splice
+			err = encoding.XtlsWrite(clientReader, serverWriter, timer, conn, trafficState, ctx1)
 		} else {
 			// from clientReader.ReadMultiBuffer to serverWriter.WriteMultiBufer
 			err = buf.Copy(clientReader, serverWriter, buf.UpdateActivity(timer))
@@ -271,16 +270,8 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			serverReader = xudp.NewPacketReader(conn)
 		}
 
-		if rawConn != nil {
-			var counter stats.Counter
-			if statConn != nil {
-				counter = statConn.ReadCounter
-			}
-			if requestAddons.Flow == vless.XRV {
-				err = encoding.XtlsRead(serverReader, clientWriter, timer, netConn, rawConn, counter, ctx, account.ID.Bytes(), &numberOfPacketToFilter, &isTLS13, &isTLS12, &isTLS)
-			} else {
-				err = encoding.ReadV(serverReader, clientWriter, timer, iConn.(*xtls.Conn), rawConn, counter, ctx)
-			}
+		if requestAddons.Flow == vless.XRV {
+			err = encoding.XtlsRead(serverReader, clientWriter, timer, conn, input, rawInput, trafficState, ctx)
 		} else {
 			// from serverReader.ReadMultiBuffer to clientWriter.WriteMultiBufer
 			err = buf.Copy(serverReader, clientWriter, buf.UpdateActivity(timer))
@@ -291,6 +282,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 
 		return nil
+	}
+
+	if newCtx != nil {
+		ctx = newCtx
 	}
 
 	if err := task.Run(ctx, postRequest, task.OnSuccess(getResponse, task.Close(clientWriter))); err != nil {
