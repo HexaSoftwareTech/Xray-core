@@ -2,6 +2,8 @@ package buf
 
 import (
 	"io"
+	"runtime"
+	"runtime/debug"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -32,6 +34,10 @@ func MergeMulti(dest MultiBuffer, src MultiBuffer) (MultiBuffer, MultiBuffer) {
 	for idx := range src {
 		src[idx] = nil
 	}
+
+	runtime.GC()
+	debug.FreeOSMemory()
+
 	return dest, src[:0]
 }
 
